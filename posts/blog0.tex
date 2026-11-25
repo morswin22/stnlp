@@ -1,24 +1,299 @@
-\documentclass[12pt]{article}
+\documentclass[12pt, a4paper]{article}
 \usepackage[margin=1in]{geometry}
 \usepackage{fontspec}
-\usepackage{hyperref}
-\usepackage{parskip}
-\setmainfont{TeX Gyre Termes}
-\hypersetup{colorlinks=true, linkcolor=black, urlcolor=blue}
+\usepackage[english, bidi=basic, provide=*]{babel}
+\babelprovide[import, onchar=ids fonts]{english}
+\babelfont{rm}{Noto Sans}
 
-\title{Building a LaTeX-Based Blog System}
-\author{Your Name}
-\date{April 6, 2026}
+\usepackage{amsmath, amssymb}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{xcolor}
+\usepackage{setspace}
+\usepackage{parskip}
+\usepackage{hyperref}
+
+\definecolor{accentblue}{RGB}{24, 78, 119}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=black,
+    citecolor=black,
+    urlcolor=accentblue,
+    pdftitle={Vectorizing Datasets: How Domain2Vec Finds Optimal LLM Data Mixtures Without Training}
+}
+
+\setstretch{1.15}
+
+\title{Vectorizing Datasets: How Domain2Vec Finds Optimal LLM Data Mixtures Without Training}
+\author{Patryk Janiak 156053}
+\date{\today}
 
 \begin{document}
+
 \maketitle
 
-This is a sample post for the LaTeX blog system template.
+\begin{center}
+\textit{A technical walkthrough of Zhang et al. (ICML 2025): turning expensive, brittle LLM data-mixing into fast vector algebra.}
+\end{center}
 
-\section*{Idea}
-Instead of writing HTML by hand, you can keep writing in \LaTeX, let GitHub Actions compile it, and publish a clean blog homepage automatically.
+\section*{Introduction}
 
-\section*{Why this workflow}
-This setup is good for personal essays, research notes, and compact technical posts.
+Imagine you are pretraining a Large Language Model (LLM) from scratch. You have gathered dozens—maybe even hundreds—of text corpora: web crawls, Wikipedia, scientific papers, books, forums, and source code. Before you spend millions of dollars on GPU compute, you face a surprisingly consequential decision: \emph{how much of each dataset should go into the training mix?}
+
+In practice, this \textbf{data mixture} is often chosen by gut feeling or expensive trial-and-error. Automated methods exist, but they usually require training many smaller proxy LLMs—and the moment you add a new dataset or clean up an old one, you have to throw those results away and start over.
+
+In \textbf{Domain2Vec}~\cite{zhang2025domain2vec}, Zhang et al. (ICML 2025) propose a refreshingly simple alternative: \emph{vectorize the datasets themselves}. By projecting any corpus into a shared coordinate system of \emph{meta-domains}, Domain2Vec lets us find strong data mixtures without training a single proxy model, and seamlessly scales existing regression-based methods to arbitrary new datasets. In this post, we will unpack how the method works, what makes it tick, and where its limitations lie.
+
+\section*{The Data Mixture Problem (and Why Existing Solutions Struggle)}
+
+Modern LLMs are never trained on a single homogeneous corpus. Instead, pretraining pipelines assemble a collection of $m$ datasets from diverse origins:
+\[
+\mathcal{D}_{\text{train}} = \{\mathcal{D}_1, \mathcal{D}_2, \dots, \mathcal{D}_m\},
+\]
+such as Common Crawl, Wikipedia, arXiv, GitHub, and books. Before training begins, practitioners must choose a \textbf{data mixture}—a probability vector $r = [r_1, r_2, \dots, r_m]^\top$ satisfying $0 \le r_i \le 1$ and $\sum_{i=1}^m r_i = 1$—that determines what fraction of training tokens comes from each source.
+
+This choice is far from cosmetic. Prior empirical work has shown that changing $r$ dramatically alters downstream capabilities, and data from one domain can either help or hinder performance on another. Formally, given a high-quality target validation set $\mathcal{D}_{\text{valid}}$ that reflects desired model behavior, the optimal data mixture $r^*$ is defined as the one minimizing the validation loss of the trained language model $\theta$:
+\begin{equation}
+r^* = \arg\min_{r} \left( \min_{\theta} \mathcal{L}_{\theta}^{\mathcal{D}_{\text{valid}}}(r) \right) \triangleq \arg\min_{r} \mathcal{L}^{\mathcal{D}_{\text{valid}}}(r).
+\label{eq:bilevel}
+\end{equation}
+
+Solving Equation~\eqref{eq:bilevel} directly at target model scale is infeasible: we cannot pretrain a multi-billion-parameter model dozens of times just to tune $r$. To work around this, prior research has largely split into two strategies:
+\begin{itemize}
+    \item \textbf{Implicit reweighting:} Filtering or selecting high-quality samples/tokens via perplexity, selective language models, or influence scores, which indirectly shifts the effective mixture.
+    \item \textbf{Explicit mixture modeling:} Training smaller proxy models to estimate the functional relationship $\mathcal{L}^{\mathcal{D}_{\text{valid}}}(r) \approx f(r)$—for instance, using group distributionally robust optimization in DoReMi~\cite{xie2023doremi}, exponential scaling laws in Data Mixing Laws~\cite{ye2024datamixing}, or gradient-boosted regression (LightGBM) in RegMix~\cite{liu2024regmix}.
+\end{itemize}
+
+Despite strong empirical results, explicit proxy-based methods suffer from two structural bottlenecks:
+\begin{enumerate}
+    \item \textbf{Poor Computational Efficiency:} Even small proxy models are expensive to train repeatedly. Worse, modeling $f(r)$ over $m$ sources typically requires $O(m^2)$ proxy runs to cover interactions among sources. While manageable for $m \approx 20$, modern web-scale corpora can contain tens of thousands of individual data dumps, making non-linear scaling prohibitive.
+    \item \textbf{Lack of Scalability (Zero Adaptability):} Because $f(r)$ takes the raw mixture vector $r \in \mathbb{R}^m$ as input, the learned function is hard-wired to a fixed set of training sources and a fixed validation set. If you add a new corpus, remove a copyrighted source, or filter out low-quality documents from an existing subset, the previously fitted $f(r)$ becomes invalid. You must resample mixtures, retrain proxy models, and refit from scratch.
+\end{enumerate}
+
+\section*{The Core Idea: A Coordinate System for Datasets}
+
+The central insight of \textbf{Domain2Vec}~\cite{zhang2025domain2vec} is remarkably clean: instead of treating each dataset $\mathcal{D}_i$ as an opaque, atomic index in $\mathbb{R}^m$, we should represent \emph{any} dataset by its semantic composition over a fixed, universal basis of \textbf{meta-domains}.
+
+Think of it like color spaces. If you want to mix paints from 500 different brands, you do not need to memorize pairwise mixing rules for all $500 \times 500$ pairs. Instead, you express every paint as a vector in a fixed 3-dimensional RGB (or CMYK) basis and perform all mixing math in that shared coordinate system. Domain2Vec builds an analogous coordinate system for text datasets.
+
+\subsection*{Step 1: Building the Meta-Domain Vocabulary (The Basis)}
+
+Suppose we define a vocabulary of $n$ concrete meta-domains $\{\mathcal{D}_1^*, \mathcal{D}_2^*, \dots, \mathcal{D}_n^*\}$, where each meta-domain $\mathcal{D}_j^*$ corresponds to the $j$-th standard basis vector $e_j \in \mathbb{R}^n$ (a one-hot vector with $1$ in position $j$ and $0$ elsewhere). Domain2Vec hypothesizes that any arbitrary dataset $\mathcal{D}$ can be approximated as a linear combination of these meta-domains:
+\begin{equation}
+v \approx \sum_{j=1}^{n} v_j \cdot e_j, \qquad v = [v_1, v_2, \dots, v_n]^\top,
+\label{eq:basis}
+\end{equation}
+where $v_j$ is the weight (proportion) of dataset $\mathcal{D}$ belonging to meta-domain $\mathcal{D}_j^*$.
+
+Drawing a direct parallel to linear algebra, the authors argue that a good meta-domain vocabulary should satisfy three properties:
+\begin{itemize}
+    \item \textbf{Spanning Set:} The meta-domains must be diverse and comprehensive enough to cover the semantic breadth of any unseen pretraining or validation corpus.
+    \item \textbf{Linear Independence:} Distinct meta-domains should capture genuinely different semantic features with minimal redundancy.
+    \item \textbf{Computational Efficiency:} Building the vocabulary and projecting new datasets onto it must be fast enough to be practical at scale.
+\end{itemize}
+
+To satisfy these criteria, the authors assemble a massive, deduplicated corpus (over 1 billion documents from more than 100 coarse sources spanning web crawls, Wikipedia, arXiv, books, news, social media, and code across English and Chinese). They then partition this corpus into semantically coherent clusters to form the meta-domains:
+\begin{itemize}
+    \item \textbf{Natural language (English and Chinese):} Documents are embedded using lightweight pretrained text encoders and clustered via $k$-means. By inspecting clustering inertia as a function of $k$, the authors select 120 English meta-domains and 120 Chinese meta-domains.
+    \item \textbf{Code:} Source code is partitioned directly by programming language into 20 meta-domains.
+\end{itemize}
+Together, this yields a fixed vocabulary of $n = 260$ meta-domains, and every document in the base corpus receives a cluster label indicating its meta-domain.
+
+\subsection*{Step 2: Vectorizing Unseen Datasets with a Meta-Domain Classifier}
+
+How do we project a brand-new, unseen dataset $\mathcal{D}$ into this 260-dimensional space? Running $k$-means assignment over billions of tokens would be slow and tied to the embedding model's geometry. Instead, Domain2Vec trains a dedicated 260-class \textbf{meta-domain classifier} (by fine-tuning a 1.5B-parameter language model on the labeled base corpus).
+
+For any single document $\text{doc} \in \mathcal{D}$, the classifier outputs a normalized probability distribution over the $n$ meta-domains:
+\begin{equation}
+p = [p_1, p_2, \dots, p_n]^\top = \mathrm{Classifier}(\text{doc}), \qquad \|p\|_1 = 1.
+\label{eq:doc_vec}
+\end{equation}
+To obtain the \textbf{domain vector} $v$ of the entire dataset $\mathcal{D}$, we simply sample $N$ documents uniformly from $\mathcal{D}$ (the authors find $N = 1000$ is sufficient for a stable estimate) and average their predicted distributions:
+\begin{equation}
+v \approx \frac{1}{N} \sum_{i=1}^{N} p^{(i)}.
+\label{eq:dataset_vec}
+\end{equation}
+
+Applying Equation~\eqref{eq:dataset_vec} to each of our $m$ training datasets yields the \textbf{training domain matrix}
+\[
+V_{\text{train}} = [v_1, v_2, \dots, v_m] \in \mathbb{R}^{n \times m},
+\]
+and applying it to the target validation set yields $v_{\text{valid}} \in \mathbb{R}^n$.
+
+Now comes the key algebraic payoff. Suppose we mix the $m$ training datasets according to a mixture ratio vector $r = [r_1, \dots, r_m]^\top$. Because sampling a document from the mixture with probabilities $r_i$ linearly combines the underlying document distributions, the domain vector of the resulting mixed training set is simply a matrix-vector product:
+\begin{equation}
+v_{\text{train}}(r) = V_{\text{train}} \cdot r \in \mathbb{R}^n.
+\label{eq:linear_mix}
+\end{equation}
+Crucially, computing $v_{\text{train}}(r)$ requires \emph{no language model training} and takes microseconds once $V_{\text{train}}$ has been precomputed.
+
+\section*{Wait—Do Optimal Mixtures Even Transfer Across Model Sizes?}
+
+Before using domain vectors to pick $r^*$ without training a target-scale LLM, one fundamental question must be answered: \emph{does the ranking of candidate data mixtures stay consistent across model sizes?} If a mixture that is optimal for an 83M-parameter model were suboptimal for a 1.6B-parameter model, any proxy-based or training-free search would be futile.
+
+The authors conduct a pilot study mixing two distinct corpora (C4 and Knowledge Pile) across several preset ratios, pretraining both a small (83M) and a much larger (1.6B) language model from scratch, and evaluating them on 20 diverse validation sets from The Pile~\cite{gao2021pile} and RedPajama. Two clear conclusions emerge:
+\begin{enumerate}
+    \item The optimal mixture ratio varies substantially depending on which validation set is used.
+    \item For any fixed validation set, the \textbf{relative ranking} of different mixture ratios is nearly identical across model sizes, exhibiting very high Spearman and Pearson rank correlations between the 83M and 1.6B models.
+\end{enumerate}
+
+This confirms that optimal data mixtures are largely an intrinsic property of the relationship between training and validation distributions rather than model scale—opening the door to both training-free and small-proxy optimization in domain vector space.
+
+\section*{Finding the Optimal Mixture in Domain Vector Space}
+
+With datasets embedded as vectors in $\mathbb{R}^n$, Domain2Vec supports two complementary algorithms for finding $r^*$: a completely \textbf{training-free} method based on distribution alignment, and a \textbf{scalable regression} method that upgrades existing proxy-based approaches.
+
+\subsection*{Method A: Training-Free Search via Distribution Alignment ($\mathrm{DA}^2$)}
+
+Standard causal language modeling pretrains parameters $\hat{\theta}$ via Maximum Likelihood Estimation (MLE) on the training distribution:
+\[
+\hat{\theta} = \arg\max_{\theta} \mathbb{E}_{X \sim \mathcal{D}_{\text{train}}} \left[ \log P(X \mid \theta) \right],
+\]
+while validation loss evaluates the negative log-likelihood on the validation distribution:
+\[
+\mathcal{L}_{\hat{\theta}}^{\mathcal{D}_{\text{valid}}} = \mathbb{E}_{X \sim \mathcal{D}_{\text{valid}}} \left[ -\log P(X \mid \hat{\theta}) \right].
+\]
+When the data distribution of $\mathcal{D}_{\text{train}}$ aligns closely with $\mathcal{D}_{\text{valid}}$, maximizing likelihood on the training set directly minimizes expected negative log-likelihood on the validation set. This motivates the \textbf{Distribution Alignment Assumption ($\mathrm{DA}^2$)}: \emph{a lower validation loss is achieved when the domain vector of the mixed training set better aligns with the domain vector of the validation set.}
+
+Under $\mathrm{DA}^2$, the expensive bilevel optimization in Equation~\eqref{eq:bilevel} reduces to a pure vector-space distance minimization problem:
+\begin{equation}
+r^* = \arg\min_{r} \operatorname{Dist}\!\left(V_{\text{train}} \cdot r,\; v_{\text{valid}}\right),
+\label{eq:da2}
+\end{equation}
+subject to the simplex constraints $0 \le r_i \le 1$, $\sum_{i=1}^m r_i = 1$, and an important practical \textbf{single-epoch token constraint}:
+\begin{equation}
+\mathrm{TotalTokens} \cdot r_i \le |\mathcal{D}_i| \qquad \forall i \in \{1, \dots, m\}.
+\label{eq:token_constraint}
+\end{equation}
+Equation~\eqref{eq:token_constraint} prevents the optimizer from assigning more tokens to a subset than it actually contains, avoiding multi-epoch repetition and overfitting on small sources. (Notice that because $\mathrm{TotalTokens}$ grows with model size under compute-optimal scaling, this constraint naturally causes the feasible optimal mixture $r^*$ to adapt to the total training budget.)
+
+\paragraph{Choosing the Distance Metric.}
+What should $\operatorname{Dist}(\cdot, \cdot)$ be? The authors compare $L_1$ distance, $L_2$ distance, Jensen--Shannon divergence, and \textbf{Huber loss}~\cite{huber1964robust}, finding that Huber loss performs best. Intuitively, Huber loss behaves quadratically ($L_2$-like) for small coordinate differences and linearly ($L_1$-like) for large discrepancies, making it both smooth and robust to outlier meta-domains. The authors also note that \textbf{Wasserstein (optimal transport) distance} is theoretically attractive because it can account for semantic proximity between different meta-domains via a ground-cost matrix $M \in \mathbb{R}^{n \times n}$; however, accurately estimating the pairwise transfer cost $c_{i,j}$ (how much training on meta-domain $i$ reduces loss on meta-domain $j$) requires substantial extra compute, so they leave it for future work.
+
+\paragraph{Search Procedure.}
+Rather than solving Equation~\eqref{eq:da2} with a single fragile point optimum, Domain2Vec+$\mathrm{DA}^2$ uses a simple, robust sampling procedure:
+\begin{enumerate}
+    \item Sample $K$ candidate mixture vectors $r^{(1)}, \dots, r^{(K)}$ (e.g., $K = 100{,}000$) from a Dirichlet distribution parameterized by the natural token proportions of the training datasets.
+    \item Discard candidates that violate the single-epoch constraint~\eqref{eq:token_constraint} via rejection sampling.
+    \item Evaluate $\operatorname{Dist}(V_{\text{train}} \cdot r^{(k)}, v_{\text{valid}})$ for each feasible candidate.
+    \item Average the top-$k$ best candidates (e.g., top-100) to produce a stable final mixture $r^*$.
+\end{enumerate}
+Notably, this entire procedure trains \emph{zero} language models during mixture search—the only compute is running the meta-domain classifier on $N = 1000$ documents per dataset and evaluating vector distances.
+
+\subsection*{Method B: Supercharging Regression Methods (Domain2Vec + RegMix)}
+
+While $\mathrm{DA}^2$ is completely training-free, coordinate-wise distance minimization has a subtle limitation: it treats the $n$ meta-domains as independent and ignores \textbf{cross-domain transfer} (for example, how training on code or mathematics can improve reasoning on non-code validation text).
+
+Regression-based methods such as RegMix~\cite{liu2024regmix} capture cross-domain interactions by fitting a non-linear predictor (LightGBM) from mixture ratios to validation loss. Domain2Vec integrates seamlessly with this paradigm while eliminating its scalability bottleneck. Instead of fitting a function $f(r)$ over the $m$ specific training sources, we fit $n$ predictors $f_1, \dots, f_n$—one for each \textbf{meta-domain} $\mathcal{D}_i^*$—mapping any training domain vector $v_{\text{train}} = V_{\text{train}} \cdot r$ to the validation loss on meta-domain $\mathcal{D}_i^*$:
+\begin{equation}
+\mathcal{L}^{\mathcal{D}_i^*}(r) = f_i(v_{\text{train}}) = f_i(V_{\text{train}} \cdot r), \qquad 1 \le i \le n.
+\label{eq:regmix_meta}
+\end{equation}
+Then, for \emph{any} unseen validation set $\mathcal{D}_{\text{valid}}$ with domain vector $v_{\text{valid}} = [q_1, q_2, \dots, q_n]^\top$, we predict its validation loss as the linear combination of the meta-domain loss predictions:
+\begin{equation}
+\mathcal{L}^{\mathcal{D}_{\text{valid}}}(r) = \sum_{i=1}^{n} q_i \cdot \mathcal{L}^{\mathcal{D}_i^*}(r) = \sum_{i=1}^{n} q_i \cdot f_i(V_{\text{train}} \cdot r).
+\label{eq:regmix_total}
+\end{equation}
+
+The same Dirichlet sampling and top-$k$ averaging search is then used to minimize Equation~\eqref{eq:regmix_total}. Because the predictors $\{f_i\}_{i=1}^n$ are defined solely over the fixed meta-domain space (fitted once using small proxy LMs trained on diverse Dirichlet mixtures), they transfer at \textbf{zero retraining cost} to:
+\begin{itemize}
+    \item any unseen validation set $\mathcal{D}_{\text{valid}}$ (just compute its vector $v_{\text{valid}}$),
+    \item any newly added or filtered training dataset (just update the corresponding column of $V_{\text{train}}$), and
+    \item any number of training sources $m$, even when $m \gg n$.
+\end{itemize}
+
+To see how these two variants stack up against prior approaches, here is a quick side-by-side summary:
+
+\begin{center}
+\small
+\begin{tabular}{@{}l p{2.7cm} p{2.7cm} p{2.7cm} p{2.7cm}@{}}
+\toprule
+\textbf{Method} & \textbf{Search Compute (New Datasets)} & \textbf{Adapts to New Train Sources?} & \textbf{Adapts to New Valid Set?} & \textbf{Models Cross-Domain Transfer?} \\
+\midrule
+DoReMi~\cite{xie2023doremi} & High (proxy + reference LM) & No (retrain proxy) & No (retrain proxy) & Yes (via proxy dynamics) \\
+RegMix~\cite{liu2024regmix} & Moderate--High ($O(m^2)$ proxies) & No (resample \& refit) & No (re-evaluate \& refit) & Yes (via LightGBM) \\
+\textbf{Domain2Vec+$\mathrm{DA}^2$} & \textbf{Minimal (training-free)} & \textbf{Yes (zero retrain)} & \textbf{Yes (zero retrain)} & No (coordinate-wise distance) \\
+\textbf{Domain2Vec+RegMix} & \textbf{Minimal (amortized)} & \textbf{Yes (zero retrain)} & \textbf{Yes (zero retrain)} & \textbf{Yes (via meta-domain $f_i$)} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section*{What Do the Experiments Tell Us?}
+
+Rather than focusing on individual benchmark numbers or training hyperparameters, let us look at the broader empirical conclusions the authors establish across two evaluation regimes:
+
+\paragraph{1. Accurate Mixture Ranking Without Proxy Training.}
+When tasked with ranking candidate mixtures across 20 diverse validation sets from The Pile and RedPajama, both Domain2Vec+$\mathrm{DA}^2$ and Domain2Vec+RegMix achieve strong positive rank correlations with ground-truth validation loss rankings. They substantially outperform random ranking as well as an embedding-based $k$-NN baseline (which averages document embeddings directly rather than using the meta-domain classifier). Interestingly, on this direct ranking task, the training-free $\mathrm{DA}^2$ variant even outperforms Domain2Vec+RegMix, showing how strong pure distribution alignment is when minimizing language modeling loss.
+
+\paragraph{2. Dramatic Compute Savings and Strong Downstream Generalization.}
+Following RegMix's observation that validation loss on the Pile-CC subset correlates strongly with general downstream capabilities, the authors optimize mixtures over the 17 copyright-free components of The Pile using Pile-CC as $\mathcal{D}_{\text{valid}}$, and evaluate pretrained models across 12 standard downstream benchmarks (spanning commonsense reasoning, reading comprehension, and scientific QA). Two major takeaways stand out:
+\begin{itemize}
+    \item \textbf{Pretraining efficiency:} Models trained on Domain2Vec mixtures reach the same Pile-CC validation loss as the original human-curated Pile mixture in roughly half the training steps, and consistently improve average downstream accuracy under equal compute budgets.
+    \item \textbf{Search efficiency:} Both Domain2Vec variants achieve downstream performance comparable to heavy proxy-based baselines like DoReMi and RegMix while spending less than $1\%$ of DoReMi's mixture-search compute (counting only classifier inference on the datasets).
+\end{itemize}
+
+\paragraph{3. Meaningful Geometry and Addressing Overfitting Concerns.}
+Visualizing the domain vectors of The Pile's sub-datasets via t-SNE confirms that the learned space is semantically structured: academic corpora (e.g., arXiv, PubMed) cluster together, as do technical programming communities (GitHub, StackExchange), while distinct domains remain well separated.
+
+The authors also proactively address a natural criticism: \emph{isn't optimizing $r$ against $\mathcal{D}_{\text{valid}}$ just overfitting to the validation set?} They point out three safeguards: (i) any data-mixture optimizer requires a guide validation set; (ii) $\mathrm{DA}^2$ involves no gradient-based training on $\mathcal{D}_{\text{valid}}$ at all; and (iii) optimizing against a single proxy set (Pile-CC) still yields broad gains across 12 distinct downstream evaluation benchmarks that were never used during mixture selection.
+
+\section*{Strengths, Limitations, and Open Questions}
+
+Domain2Vec offers a compelling reframing of data mixture optimization, but like any abstraction, it comes with trade-offs worth examining closely.
+
+\subsection*{What Works Well}
+\begin{itemize}
+    \item \textbf{Decoupling from Dataset Identity:} Moving optimization from $\mathbb{R}^m$ to the fixed basis $\mathbb{R}^n$ solves the scalability crisis of modern LLM data pipelines, where thousands of web dumps are continuously added, deduplicated, or filtered.
+    \item \textbf{Near-Zero Marginal Cost:} Once the meta-domain classifier (and optionally the meta-domain regressors) exist, vectorizing a new dataset only requires classifying $N = 1000$ sampled documents.
+    \item \textbf{Modularity and Interpretability:} Domain2Vec is not tied to a single downstream optimizer—it can plug into $\mathrm{DA}^2$, RegMix, or future scaling laws. Moreover, domain vectors serve as interpretable semantic fingerprints of otherwise opaque corpora.
+\end{itemize}
+
+\subsection*{Where It Falls Short}
+\begin{itemize}
+    \item \textbf{Fixed Vocabulary Coverage:} The entire framework rests on the \emph{spanning set} assumption. The authors' vocabulary covers English, Chinese, and 20 programming languages. If a practitioner needs to optimize mixtures for low-resource languages, specialized scientific modalities, or emerging domains absent from the base corpus, the 260 meta-domains may fail to distinguish them accurately.
+    \item \textbf{Domain Composition $\neq$ Data Quality:} Domain vectors capture \emph{what} a dataset is about, not necessarily \emph{how well-written or clean} it is. Two web-crawl subsets covering the same topics—one carefully filtered and one noisy—could map to nearly identical domain vectors, yet yield very different model quality. Domain2Vec therefore complements, rather than replaces, data quality filtering.
+    \item \textbf{Ignoring Cross-Domain Transfer in $\mathrm{DA}^2$:} Coordinate-wise metrics like Huber loss treat meta-domains as orthogonal. They cannot capture synergistic effects where training on meta-domain $A$ boosts performance on meta-domain $B$. While Domain2Vec+RegMix addresses this, it reintroduces a substantial \emph{one-time upfront cost} (training over 10,000 small proxy LMs to fit the 260 LightGBM predictors accurately).
+    \item \textbf{Reliance on a Good Proxy Validation Set:} Both $\mathrm{DA}^2$ and +RegMix are only as good as $\mathcal{D}_{\text{valid}}$. In practice, choosing a validation set that faithfully proxies complex downstream abilities (like multi-step reasoning or instruction following) remains an open challenge.
+    \item \textbf{Classifier Error Ceiling:} The 260-class meta-domain classifier is imperfect (achieving roughly 75\% test accuracy). Although averaging over $N=1000$ documents reduces variance, systematic misclassification between semantically adjacent clusters can still introduce bias into $V_{\text{train}}$.
+\end{itemize}
+
+\section*{Closing Thoughts}
+
+Domain2Vec demonstrates that data mixture optimization does not have to be a brute-force search over raw dataset indices. By introducing a shared vocabulary of meta-domains and projecting corpora into a linear domain vector space, Zhang et al.~\cite{zhang2025domain2vec} turn an expensive, brittle bilevel optimization problem into fast vector algebra. Whether used completely training-free via Distribution Alignment ($\mathrm{DA}^2$) or paired with regression models like RegMix to capture cross-domain interactions, the core lesson is clear: \emph{giving datasets a universal coordinate system unlocks both dramatic compute savings and effortless scalability.}
+
+\begin{thebibliography}{9}
+
+\bibitem{zhang2025domain2vec}
+M. Zhang, H. Tissue, L. Wang, and X. Qiu.
+\newblock Domain2Vec: Vectorizing Datasets to Find the Optimal Data Mixture without Training.
+\newblock In \emph{Proceedings of the 42nd International Conference on Machine Learning (ICML)}, PMLR 267, 2025. arXiv:2506.10952.
+
+\bibitem{xie2023doremi}
+S. M. Xie, H. Pham, X. Dong, N. Du, H. Liu, Y. Lu, P. Liang, Q. V. Le, T. Ma, and A. W. Yu.
+\newblock DoReMi: Optimizing Data Mixtures Speeds Up Language Model Pretraining.
+\newblock In \emph{Advances in Neural Information Processing Systems (NeurIPS)}, 2023.
+
+\bibitem{liu2024regmix}
+Q. Liu, X. Zheng, N. Muennighoff, G. Zeng, L. Dou, T. Pang, J. Jiang, and M. Lin.
+\newblock RegMix: Data Mixture as Regression for Language Model Pre-training.
+\newblock arXiv preprint arXiv:2407.01492, 2024.
+
+\bibitem{ye2024datamixing}
+J. Ye, P. Liu, T. Sun, Y. Zhou, J. Zhan, and X. Qiu.
+\newblock Data Mixing Laws: Optimizing Data Mixtures by Predicting Language Modeling Performance.
+\newblock arXiv preprint arXiv:2403.16952, 2024.
+
+\bibitem{gao2021pile}
+L. Gao, S. Biderman, S. Black, L. Golding, T. Hoppe, C. Foster, J. Phang, H. He, A. Thite, N. Nabeshima, S. Presser, and C. Leahy.
+\newblock The Pile: An 800GB Dataset of Diverse Text for Language Modeling.
+\newblock arXiv preprint arXiv:2101.00027, 2021.
+
+\bibitem{huber1964robust}
+P. J. Huber.
+\newblock Robust Estimation of a Location Parameter.
+\newblock \emph{The Annals of Mathematical Statistics}, 35(1):73--101, 1964.
+
+\end{thebibliography}
 
 \end{document}

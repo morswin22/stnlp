@@ -151,17 +151,9 @@ def generate_front_page():
 <body>
   <div class="wrapper">
     <header class="hero">
-      <p class="eyebrow">Your Name</p>
-      <h1>LaTeX Blog Template</h1>
-      <p class="hero-copy">A blog-style LaTeX template that compiles posts with GitHub Actions.</p>
+      <p class="eyebrow">Patryk Janiak 156053</p>
+      <h1>Selected Topics in Natural Language Processing</h1>
     </header>
-
-    <section class="manifesto" id="manifesto">
-      <div class="manifesto-kicker">Manifesto</div>
-      <div class="manifesto-body">
-        <p>Write with the clarity of LaTeX, publish with the ease of GitHub Pages.</p>
-      </div>
-    </section>
 
     <section class="index-block">
       <div class="index-heading">
@@ -175,7 +167,6 @@ def generate_front_page():
         fh.write('''      </ul></nav>
     </section>
 
-    <p class="footer-note">Generated from `posts/*.tex` by GitHub Actions.</p>
   </div>
 </body>
 </html>
