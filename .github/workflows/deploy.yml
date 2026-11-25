@@ -1,0 +1,104 @@
+name: Build and Deploy LaTeX Blog
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'posts/**/*.tex'
+      - 'build_blog.py'
+      - 'blog.yaml'
+      - 'style.css'
+      - 'README.md'
+      - 'requirements.txt'
+      - '.github/workflows/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+env:
+  CF_TOKEN_SET: ${{ secrets.CLOUDFLARE_API_TOKEN != '' }}
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Install Python deps
+        run: pip install -r requirements.txt
+
+      - name: Install TeX Live
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            latexmk \
+            texlive-xetex \
+            texlive-latex-extra \
+            texlive-lang-chinese \
+            texlive-fonts-recommended \
+            fonts-noto-cjk
+
+      - name: Compile all posts
+        shell: bash
+        run: |
+          shopt -s nullglob
+          files=(posts/*.tex)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "No posts found in posts/*.tex"
+            exit 1
+          fi
+          for file in "${files[@]}"; do
+            latexmk -xelatex -interaction=nonstopmode -halt-on-error "$file"
+            base=$(basename "$file" .tex)
+            if [ -f "$base.pdf" ]; then
+              echo "Found output at $base.pdf"
+            elif [ -f "posts/$base.pdf" ]; then
+              mv "posts/$base.pdf" .
+            else
+              echo "Expected PDF not found for $file"
+              exit 1
+            fi
+          done
+          python build_blog.py from_tex "${files[@]}"
+          cp style.css dist/style.css
+
+      # Deploys to Cloudflare Pages when the secrets are configured; skipped in forks.
+      - name: Deploy to Cloudflare Pages
+        if: ${{ env.CF_TOKEN_SET == 'true' }}
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: pages deploy dist --project-name=latex-blog-template --branch=main
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

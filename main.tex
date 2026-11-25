@@ -1,0 +1,65 @@
+\documentclass[12pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{fontspec}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{setspace}
+\usepackage{parskip}
+\usepackage{titlesec}
+
+\setmainfont{TeX Gyre Termes}
+\hypersetup{
+  colorlinks=true,
+  linkcolor=black,
+  urlcolor=blue,
+  citecolor=black
+}
+
+\titleformat{\section}{\large\bfseries}{}{0pt}{}
+\setstretch{1.15}
+
+\title{Your LaTeX Blog Title}
+\author{Your Name}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\begin{center}
+\textit{A minimal LaTeX blog template for GitHub Pages.}
+\end{center}
+
+\section*{Introduction}
+
+This repository is a lightweight starting point for publishing a blog post, essay,
+or technical note written in \LaTeX.
+
+You only need to edit \texttt{main.tex}, push to GitHub, and let GitHub Actions
+compile and deploy the result.
+
+\section*{Why this template exists}
+
+Many personal sites want the simplicity of writing in \LaTeX, but also want a
+clean web page for reading and sharing. This template keeps the workflow small:
+
+\begin{itemize}
+  \item write in \LaTeX
+  \item compile automatically in CI
+  \item publish the PDF with a simple HTML wrapper
+\end{itemize}
+
+\section*{How to customize}
+
+Replace this content with your own post. You can freely add sections, equations,
+figures, references, or bilingual text.
+
+For example, you can add a link like this:
+\href{https://github.com/}{GitHub}.
+
+\section*{Next step}
+
+Turn this into your own blog post and publish it.
+
+\end{document}
