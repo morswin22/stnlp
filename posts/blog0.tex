@@ -1,18 +1,16 @@
-\documentclass[12pt, a4paper]{article}
+\documentclass[12pt]{article}
 \usepackage[margin=1in]{geometry}
 \usepackage{fontspec}
-\usepackage[english, bidi=basic, provide=*]{babel}
-\babelprovide[import, onchar=ids fonts]{english}
-\babelfont{rm}{Noto Sans}
-
 \usepackage{amsmath, amssymb}
 \usepackage{booktabs}
 \usepackage{array}
 \usepackage{xcolor}
 \usepackage{setspace}
 \usepackage{parskip}
+\usepackage{titlesec}
 \usepackage{hyperref}
 
+\setmainfont{TeX Gyre Termes}
 \definecolor{accentblue}{RGB}{24, 78, 119}
 
 \hypersetup{
@@ -23,6 +21,7 @@
     pdftitle={Vectorizing Datasets: How Domain2Vec Finds Optimal LLM Data Mixtures Without Training}
 }
 
+\titleformat{\section}{\large\bfseries}{}{0pt}{}
 \setstretch{1.15}
 
 \title{Vectorizing Datasets: How Domain2Vec Finds Optimal LLM Data Mixtures Without Training}
